@@ -256,6 +256,45 @@ def _get_json_field_name(format_spec, col_idx):
     return json_fields[col_idx]
 
 
+def _extract_fields(row, format_spec, is_jsonl):
+    """Extract date_str, amount_str, description, and captures from a row."""
+    def get_json_value(col_idx):
+        field_name = _get_json_field_name(format_spec, col_idx)
+        if not field_name:
+            return ''
+        return _json_value_to_text(row.get(field_name))
+
+    captures = {}
+    if is_jsonl:
+        date_str = get_json_value(format_spec.date_column).strip()
+        amount_str = get_json_value(format_spec.amount_column).strip()
+
+        if format_spec.description_column is not None:
+            description = get_json_value(format_spec.description_column).strip()
+            if format_spec.extra_fields:
+                for name, col_idx in format_spec.extra_fields.items():
+                    captures[name] = get_json_value(col_idx).strip()
+        else:
+            for name, col_idx in format_spec.custom_captures.items():
+                captures[name] = get_json_value(col_idx).strip()
+            description = format_spec.description_template.format(**captures)
+    else:
+        date_str = row[format_spec.date_column].strip()
+        amount_str = row[format_spec.amount_column].strip()
+
+        if format_spec.description_column is not None:
+            description = row[format_spec.description_column].strip()
+            if format_spec.extra_fields:
+                for name, col_idx in format_spec.extra_fields.items():
+                    captures[name] = row[col_idx].strip() if col_idx < len(row) else ''
+        else:
+            for name, col_idx in format_spec.custom_captures.items():
+                captures[name] = row[col_idx].strip() if col_idx < len(row) else ''
+            description = format_spec.description_template.format(**captures)
+
+    return date_str, amount_str, description, captures
+
+
 def parse_generic_csv(filepath, format_spec, rules, source_name='CSV',
                       decimal_separator='.', transforms=None, data_sources=None):
     """
@@ -337,57 +376,19 @@ def parse_generic_csv(filepath, format_spec, rules, source_name='CSV',
             ))
             continue
 
+        # For CSV, ensure row has enough columns
+        if not is_jsonl and len(row) <= max_col:
+            skipped_rows.append(SkippedRow(
+                filepath=filepath,
+                line_number=line_num,
+                reason='insufficient_columns',
+                message=f"Expected {max_col + 1} columns, got {len(row)}",
+                raw_data=raw_line,
+            ))
+            continue
+
         try:
-            captures = {}
-            if is_jsonl:
-                def get_json_value(col_idx):
-                    field_name = _get_json_field_name(format_spec, col_idx)
-                    if not field_name:
-                        return ''
-                    return _json_value_to_text(row.get(field_name))
-
-                date_str = get_json_value(format_spec.date_column).strip()
-                amount_str = get_json_value(format_spec.amount_column).strip()
-
-                if format_spec.description_column is not None:
-                    description = get_json_value(format_spec.description_column).strip()
-                    if format_spec.extra_fields:
-                        for name, col_idx in format_spec.extra_fields.items():
-                            captures[name] = get_json_value(col_idx).strip()
-                else:
-                    for name, col_idx in format_spec.custom_captures.items():
-                        captures[name] = get_json_value(col_idx).strip()
-                    description = format_spec.description_template.format(**captures)
-            else:
-                # Ensure row has enough columns
-                if len(row) <= max_col:
-                    skipped_rows.append(SkippedRow(
-                        filepath=filepath,
-                        line_number=line_num,
-                        reason='insufficient_columns',
-                        message=f"Expected {max_col + 1} columns, got {len(row)}",
-                        raw_data=raw_line,
-                    ))
-                    continue
-
-                # Extract values
-                date_str = row[format_spec.date_column].strip()
-                amount_str = row[format_spec.amount_column].strip()
-
-                # Build description from either mode
-                # Also capture custom fields for use in rule expressions (field.name)
-                if format_spec.description_column is not None:
-                    # Mode 1: Simple {description} with optional extra fields
-                    description = row[format_spec.description_column].strip()
-                    # Capture extra fields (e.g., {cardholder}) for rule expressions
-                    if format_spec.extra_fields:
-                        for name, col_idx in format_spec.extra_fields.items():
-                            captures[name] = row[col_idx].strip() if col_idx < len(row) else ''
-                else:
-                    # Mode 2: Custom captures + template
-                    for name, col_idx in format_spec.custom_captures.items():
-                        captures[name] = row[col_idx].strip() if col_idx < len(row) else ''
-                    description = format_spec.description_template.format(**captures)
+            date_str, amount_str, description, captures = _extract_fields(row, format_spec, is_jsonl)
 
             # Check for empty required fields
             empty_fields = []
