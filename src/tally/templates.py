@@ -22,13 +22,22 @@ data_sources:
   #   file: data/checking.csv
   #   format: "{{date:%Y-%m-%d}},{{description}},{{-amount}}"
   #
-  # Folder + glob examples (CSV only):
+  # Folder + glob examples (CSV/JSONL):
   # - name: Exports (top-level only)
-  #   file: data/exports/          # loads all *.csv in this folder
+  #   file: data/exports/          # loads all *.csv and *.jsonl in this folder
   # - name: Monthly Exports
   #   file: data/exports/*.csv     # top-level glob
   # - name: All Exports (recursive)
   #   file: data/exports/**/*.csv  # recursive glob
+  #
+  # JSONL example:
+  # - name: App Export
+  #   file: data/transactions.jsonl
+  #   format: "{{date:%Y-%m-%d}},{{description}},{{amount}}"
+  #   columns:
+  #     date: booking_date
+  #     description: remittance_information
+  #     amount: amount
 
 output_dir: output
 html_filename: spending_summary.html

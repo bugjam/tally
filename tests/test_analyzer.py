@@ -8,6 +8,7 @@ from datetime import date
 
 from tally.analyzer import parse_amount, analyze_transactions, export_json, export_csv
 from tally.analyzer import parse_generic_csv as _parse_generic_csv
+from tally.config_loader import load_supplemental_sources, resolve_source_format
 from tally.parsers import SkippedRow, ParseResult, _detect_date_format
 from tally.format_parser import parse_format_string
 from tally.merchant_utils import get_all_rules
@@ -525,6 +526,197 @@ class TestParseGenericCsvDecimalSeparator:
             assert txns[2]['amount'] == 1234.56
         finally:
             os.unlink(f.name)
+
+    def test_jsonl_format_parses_transactions(self):
+        """Parse JSONL transaction files using the generic format config."""
+        jsonl_content = '\n'.join([
+            json.dumps({
+                'date': '2025-01-15',
+                'description': 'GROCERY STORE',
+                'cardholder': 'Alice',
+                'amount': '123.45',
+            }),
+            json.dumps({
+                'date': '2025-01-16',
+                'description': 'COFFEE SHOP',
+                'cardholder': 'Bob',
+                'amount': '5.99',
+            }),
+        ])
+        f = tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8')
+        try:
+            f.write(jsonl_content)
+            f.close()
+
+            rules = get_all_rules()
+            format_spec = parse_format_string('{date:%Y-%m-%d},{description},{cardholder},{amount}')
+            txns = parse_generic_csv(f.name, format_spec, rules)
+
+            assert len(txns) == 2
+            assert txns[0]['amount'] == 123.45
+            assert txns[0]['raw_description'] == 'GROCERY STORE'
+            assert txns[0]['field'] == {'cardholder': 'Alice'}
+            assert txns[1]['amount'] == 5.99
+            assert txns[1]['field'] == {'cardholder': 'Bob'}
+        finally:
+            os.unlink(f.name)
+
+    def test_jsonl_reserved_fields_can_be_aliased_via_columns(self):
+        """JSONL can map provider-specific keys onto reserved date/description/amount fields."""
+        jsonl_content = '\n'.join([
+            json.dumps({
+                'booking_date': '2025-01-15',
+                'remittance_information': 'GROCERY STORE',
+                'amount_value': '123.45',
+                'cardholder': 'Alice',
+            }),
+            json.dumps({
+                'booking_date': '2025-01-16',
+                'remittance_information': 'COFFEE SHOP',
+                'amount_value': '5.99',
+                'cardholder': 'Bob',
+            }),
+        ])
+        f = tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8')
+        try:
+            f.write(jsonl_content)
+            f.close()
+
+            source = resolve_source_format({
+                'name': 'bank_export',
+                'file': f.name,
+                'format': '{date:%Y-%m-%d},{description},{cardholder},{amount}',
+                'columns': {
+                    'date': 'booking_date',
+                    'description': 'remittance_information',
+                    'amount': 'amount_value',
+                },
+            })
+            rules = get_all_rules()
+            txns = parse_generic_csv(f.name, source['_format_spec'], rules)
+
+            assert len(txns) == 2
+            assert txns[0]['raw_description'] == 'GROCERY STORE'
+            assert txns[0]['amount'] == 123.45
+            assert txns[0]['field'] == {'cardholder': 'Alice'}
+            assert txns[1]['raw_description'] == 'COFFEE SHOP'
+            assert txns[1]['amount'] == 5.99
+            assert txns[1]['field'] == {'cardholder': 'Bob'}
+        finally:
+            os.unlink(f.name)
+
+    def test_jsonl_invalid_lines_tracked(self):
+        """Invalid JSONL rows should be reported as skipped rows."""
+        jsonl_content = '\n'.join([
+            json.dumps({
+                'date': '2025-01-15',
+                'description': 'GROCERY STORE',
+                'amount': '123.45',
+            }),
+            '{"date": "2025-01-16", "description": ',
+            json.dumps(['not', 'an', 'object']),
+        ])
+        f = tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8')
+        try:
+            f.write(jsonl_content)
+            f.close()
+
+            rules = get_all_rules()
+            format_spec = parse_format_string('{date:%Y-%m-%d},{description},{amount}')
+            result = _parse_generic_csv(f.name, format_spec, rules)
+
+            assert len(result.transactions) == 1
+            assert len(result.skipped_rows) == 2
+            assert result.skipped_rows[0].reason == 'invalid_json'
+            assert result.skipped_rows[1].reason == 'json_not_object'
+        finally:
+            os.unlink(f.name)
+
+
+class TestSupplementalJsonlSources:
+    """Tests for JSONL supplemental source loading."""
+
+    def test_load_supplemental_jsonl_source(self):
+        """Supplemental JSONL sources should load as queryable row dicts."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = os.path.join(tmpdir, 'config')
+            data_dir = os.path.join(tmpdir, 'data')
+            os.makedirs(config_dir)
+            os.makedirs(data_dir)
+
+            jsonl_path = os.path.join(data_dir, 'orders.jsonl')
+            with open(jsonl_path, 'w', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    'date': '2025-01-15',
+                    'item': 'Book',
+                    'amount': '25.00',
+                }) + '\n')
+                f.write(json.dumps({
+                    'date': '2025-01-16',
+                    'item': 'Headphones',
+                    'amount': '50.00',
+                }) + '\n')
+
+            source = resolve_source_format({
+                'name': 'amazon_orders',
+                'file': 'data/orders.jsonl',
+                'format': '{date:%Y-%m-%d},{item},{amount}',
+                'columns': {
+                    'description': '{item}',
+                },
+                'supplemental': True,
+            })
+            config = {'data_sources': [source]}
+
+            data_sources = load_supplemental_sources(config, config_dir)
+
+            assert 'amazon_orders' in data_sources
+            assert len(data_sources['amazon_orders']) == 2
+            assert data_sources['amazon_orders'][0]['item'] == 'Book'
+            assert data_sources['amazon_orders'][0]['amount'] == 25.0
+            assert data_sources['amazon_orders'][0]['date'] == date(2025, 1, 15)
+
+    def test_load_supplemental_jsonl_source_with_reserved_field_aliases(self):
+        """Supplemental JSONL sources honor columns.* aliases for reserved fields."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_dir = os.path.join(tmpdir, 'config')
+            data_dir = os.path.join(tmpdir, 'data')
+            os.makedirs(config_dir)
+            os.makedirs(data_dir)
+
+            jsonl_path = os.path.join(data_dir, 'orders.jsonl')
+            with open(jsonl_path, 'w', encoding='utf-8') as f:
+                f.write(json.dumps({
+                    'posted_on': '2025-01-15',
+                    'title': 'Book',
+                    'total_value': '25.00',
+                }) + '\n')
+                f.write(json.dumps({
+                    'posted_on': '2025-01-16',
+                    'title': 'Headphones',
+                    'total_value': '50.00',
+                }) + '\n')
+
+            source = resolve_source_format({
+                'name': 'amazon_orders',
+                'file': 'data/orders.jsonl',
+                'format': '{date:%Y-%m-%d},{description},{amount}',
+                'columns': {
+                    'date': 'posted_on',
+                    'description': 'title',
+                    'amount': 'total_value',
+                },
+                'supplemental': True,
+            })
+            config = {'data_sources': [source]}
+
+            data_sources = load_supplemental_sources(config, config_dir)
+
+            assert 'amazon_orders' in data_sources
+            assert len(data_sources['amazon_orders']) == 2
+            assert data_sources['amazon_orders'][0]['description'] == 'Book'
+            assert data_sources['amazon_orders'][0]['amount'] == 25.0
+            assert data_sources['amazon_orders'][0]['date'] == date(2025, 1, 15)
 
     def test_european_format_csv(self):
         """Parse CSV with European number format."""

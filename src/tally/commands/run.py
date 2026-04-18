@@ -113,7 +113,7 @@ def cmd_run(args):
                 if match_kind == 'glob':
                     print(f"  {source['name']}: No files matched - {source['file']}")
                 elif match_kind == 'dir':
-                    print(f"  {source['name']}: No CSV files found - {source['file']}")
+                    print(f"  {source['name']}: No CSV or JSONL files found - {source['file']}")
                 else:
                     print(f"  {source['name']}: File not found - {source['file']}")
             continue
@@ -180,6 +180,8 @@ def cmd_run(args):
                     'amount_parse_error': 'amount parse error',
                     'insufficient_columns': 'insufficient columns',
                     'regex_mismatch': 'regex mismatch',
+                    'invalid_json': 'invalid json',
+                    'json_not_object': 'json line is not an object',
                     'zero_amount': 'zero amount',
                     'parse_exception': 'parse error',
                 }
@@ -213,6 +215,8 @@ def cmd_run(args):
                 'amount_parse_error': 'amount parse error',
                 'insufficient_columns': 'insufficient columns',
                 'regex_mismatch': 'regex mismatch',
+                'invalid_json': 'invalid json',
+                'json_not_object': 'json line is not an object',
                 'zero_amount': 'zero amount',
                 'parse_exception': 'parse error',
             }

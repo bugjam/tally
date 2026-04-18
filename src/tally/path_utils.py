@@ -12,7 +12,7 @@ def resolve_data_source_paths(config_dir, file_spec):
 
     Supports:
       - Direct file paths
-      - Directory paths (top-level *.csv only)
+      - Directory paths (top-level *.csv and *.jsonl)
       - Glob patterns with * and ** (recursive)
 
     Returns:
@@ -46,7 +46,7 @@ def resolve_data_source_paths(config_dir, file_spec):
         files = []
         for entry in os.listdir(spec):
             full_path = os.path.join(spec, entry)
-            if os.path.isfile(full_path) and entry.lower().endswith('.csv'):
+            if os.path.isfile(full_path) and entry.lower().endswith(('.csv', '.jsonl', '.ndjson')):
                 files.append(os.path.normpath(full_path))
         return sorted(files), 'dir'
 

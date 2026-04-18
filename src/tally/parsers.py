@@ -5,6 +5,7 @@ This module handles parsing of CSV files and other transaction formats.
 """
 
 import csv
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -207,6 +208,54 @@ def _iter_rows_with_delimiter(filepath, delimiter, has_header):
                 yield (line_num, row, raw_line, None)
 
 
+def _is_jsonl_file(filepath):
+    """Return True when the file should be parsed as JSON Lines."""
+    return filepath.lower().endswith(('.jsonl', '.ndjson'))
+
+
+def _iter_jsonl_rows(filepath):
+    """Iterate over JSONL rows as dictionaries."""
+    with open(filepath, 'r', encoding='utf-8') as f:
+        for line_num, line in enumerate(f, start=1):
+            raw_line = line.rstrip('\n\r')
+            if not raw_line.strip():
+                yield (line_num, None, raw_line, 'empty_line')
+                continue
+            try:
+                row = json.loads(raw_line)
+            except json.JSONDecodeError:
+                yield (line_num, None, raw_line, 'invalid_json')
+                continue
+            if not isinstance(row, dict):
+                yield (line_num, None, raw_line, 'json_not_object')
+                continue
+            yield (line_num, row, raw_line, None)
+
+
+def _json_value_to_text(value):
+    """Convert a JSON value into the string form expected by the parser."""
+    if value is None:
+        return ''
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _get_json_field_name(format_spec, col_idx):
+    """Resolve the JSON field name for a format column, honoring overrides."""
+    if col_idx is None:
+        return None
+
+    overrides = getattr(format_spec, 'json_field_overrides', None) or {}
+    if col_idx in overrides:
+        return overrides[col_idx]
+
+    json_fields = getattr(format_spec, 'column_fields', []) or []
+    if col_idx >= len(json_fields):
+        return None
+    return json_fields[col_idx]
+
+
 def parse_generic_csv(filepath, format_spec, rules, source_name='CSV',
                       decimal_separator='.', transforms=None, data_sources=None):
     """
@@ -231,22 +280,31 @@ def parse_generic_csv(filepath, format_spec, rules, source_name='CSV',
     """
     transactions = []
     skipped_rows = []
+    is_jsonl = _is_jsonl_file(filepath)
 
     # Get delimiter from format spec
     delimiter = getattr(format_spec, 'delimiter', None)
 
-    # Calculate max required column once
-    required_cols = [format_spec.date_column, format_spec.amount_column]
-    if format_spec.description_column is not None:
-        required_cols.append(format_spec.description_column)
-    if format_spec.custom_captures:
-        required_cols.extend(format_spec.custom_captures.values())
-    if format_spec.extra_fields:
-        required_cols.extend(format_spec.extra_fields.values())
-    max_col = max(required_cols)
+    if not is_jsonl:
+        # Calculate max required column once
+        required_cols = [format_spec.date_column, format_spec.amount_column]
+        if format_spec.description_column is not None:
+            required_cols.append(format_spec.description_column)
+        if format_spec.custom_captures:
+            required_cols.extend(format_spec.custom_captures.values())
+        if format_spec.extra_fields:
+            required_cols.extend(format_spec.extra_fields.values())
+        max_col = max(required_cols)
+    else:
+        max_col = None
 
-    for line_num, row, raw_line, iter_skip_reason in _iter_rows_with_delimiter(
-            filepath, delimiter, format_spec.has_header):
+    row_iter = (
+        _iter_jsonl_rows(filepath)
+        if is_jsonl else
+        _iter_rows_with_delimiter(filepath, delimiter, format_spec.has_header)
+    )
+
+    for line_num, row, raw_line, iter_skip_reason in row_iter:
         # Handle skips from the iterator (regex mode)
         if iter_skip_reason == 'empty_line':
             # Don't report empty lines as errors - they're expected
@@ -260,38 +318,76 @@ def parse_generic_csv(filepath, format_spec, rules, source_name='CSV',
                 raw_data=raw_line,
             ))
             continue
+        if iter_skip_reason == 'invalid_json':
+            skipped_rows.append(SkippedRow(
+                filepath=filepath,
+                line_number=line_num,
+                reason='invalid_json',
+                message="Line is not valid JSON",
+                raw_data=raw_line,
+            ))
+            continue
+        if iter_skip_reason == 'json_not_object':
+            skipped_rows.append(SkippedRow(
+                filepath=filepath,
+                line_number=line_num,
+                reason='json_not_object',
+                message="JSONL line must be a JSON object",
+                raw_data=raw_line,
+            ))
+            continue
 
         try:
-            # Ensure row has enough columns
-            if len(row) <= max_col:
-                skipped_rows.append(SkippedRow(
-                    filepath=filepath,
-                    line_number=line_num,
-                    reason='insufficient_columns',
-                    message=f"Expected {max_col + 1} columns, got {len(row)}",
-                    raw_data=raw_line,
-                ))
-                continue
-
-            # Extract values
-            date_str = row[format_spec.date_column].strip()
-            amount_str = row[format_spec.amount_column].strip()
-
-            # Build description from either mode
-            # Also capture custom fields for use in rule expressions (field.name)
             captures = {}
-            if format_spec.description_column is not None:
-                # Mode 1: Simple {description} with optional extra fields
-                description = row[format_spec.description_column].strip()
-                # Capture extra fields (e.g., {cardholder}) for rule expressions
-                if format_spec.extra_fields:
-                    for name, col_idx in format_spec.extra_fields.items():
-                        captures[name] = row[col_idx].strip() if col_idx < len(row) else ''
+            if is_jsonl:
+                def get_json_value(col_idx):
+                    field_name = _get_json_field_name(format_spec, col_idx)
+                    if not field_name:
+                        return ''
+                    return _json_value_to_text(row.get(field_name))
+
+                date_str = get_json_value(format_spec.date_column).strip()
+                amount_str = get_json_value(format_spec.amount_column).strip()
+
+                if format_spec.description_column is not None:
+                    description = get_json_value(format_spec.description_column).strip()
+                    if format_spec.extra_fields:
+                        for name, col_idx in format_spec.extra_fields.items():
+                            captures[name] = get_json_value(col_idx).strip()
+                else:
+                    for name, col_idx in format_spec.custom_captures.items():
+                        captures[name] = get_json_value(col_idx).strip()
+                    description = format_spec.description_template.format(**captures)
             else:
-                # Mode 2: Custom captures + template
-                for name, col_idx in format_spec.custom_captures.items():
-                    captures[name] = row[col_idx].strip() if col_idx < len(row) else ''
-                description = format_spec.description_template.format(**captures)
+                # Ensure row has enough columns
+                if len(row) <= max_col:
+                    skipped_rows.append(SkippedRow(
+                        filepath=filepath,
+                        line_number=line_num,
+                        reason='insufficient_columns',
+                        message=f"Expected {max_col + 1} columns, got {len(row)}",
+                        raw_data=raw_line,
+                    ))
+                    continue
+
+                # Extract values
+                date_str = row[format_spec.date_column].strip()
+                amount_str = row[format_spec.amount_column].strip()
+
+                # Build description from either mode
+                # Also capture custom fields for use in rule expressions (field.name)
+                if format_spec.description_column is not None:
+                    # Mode 1: Simple {description} with optional extra fields
+                    description = row[format_spec.description_column].strip()
+                    # Capture extra fields (e.g., {cardholder}) for rule expressions
+                    if format_spec.extra_fields:
+                        for name, col_idx in format_spec.extra_fields.items():
+                            captures[name] = row[col_idx].strip() if col_idx < len(row) else ''
+                else:
+                    # Mode 2: Custom captures + template
+                    for name, col_idx in format_spec.custom_captures.items():
+                        captures[name] = row[col_idx].strip() if col_idx < len(row) else ''
+                    description = format_spec.description_template.format(**captures)
 
             # Check for empty required fields
             empty_fields = []
@@ -405,7 +501,7 @@ def parse_generic_csv(filepath, format_spec, rules, source_name='CSV',
                 'match_info': match_info,
                 'tags': match_info.get('tags', []) if match_info else [],
                 'excluded': None,  # No auto-exclusion; use rules to categorize
-                'field': captures if captures else None,  # Custom CSV captures for rule expressions
+                'field': captures if captures else None,  # Custom captures for rule expressions
             }
             # Add _raw_* keys from transforms
             if transform_raw_values:

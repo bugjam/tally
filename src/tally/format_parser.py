@@ -25,6 +25,8 @@ class FormatSpec:
     negate_amount: bool = False  # If True, flip the sign of amounts (use {-amount} in format)
     abs_amount: bool = False  # If True, take absolute value of amounts (use {+amount} in format)
     delimiter: Optional[str] = None  # Column delimiter: None=comma, 'tab', 'whitespace', or regex pattern
+    column_fields: Optional[list] = None  # Raw field names by position, used for structured inputs like JSONL
+    json_field_overrides: Optional[dict] = None  # Optional per-column JSON field aliases for reserved fields
 
 
 # Reserved field names that cannot be used for custom captures
@@ -80,6 +82,8 @@ def parse_format_string(format_str: str, description_template: Optional[str] = N
     negate_amount = False
     abs_amount = False
 
+    column_fields = []
+
     for idx, part in enumerate(parts):
         match = field_pattern.match(part)
         if not match:
@@ -87,11 +91,15 @@ def parse_format_string(format_str: str, description_template: Optional[str] = N
 
         negate_prefix = match.group(1)  # '-' or ''
         field_name = match.group(2).lower()
+        raw_field_name = match.group(2)
         format_spec = match.group(3)  # May be None
 
         # Skip placeholder columns: {_} or {*} (alias)
         if field_name == '_' or field_name == '*':
+            column_fields.append(None)
             continue
+
+        column_fields.append(raw_field_name)
 
         # Check if it's a reserved field or custom capture
         if field_name in RESERVED_NAMES:
@@ -172,7 +180,8 @@ def parse_format_string(format_str: str, description_template: Optional[str] = N
         has_header=True,
         negate_amount=negate_amount,
         abs_amount=abs_amount,
-        delimiter=None  # Will be set by config_loader if specified
+        delimiter=None,  # Will be set by config_loader if specified
+        column_fields=column_fields,
     )
 
 
