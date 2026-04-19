@@ -8,6 +8,7 @@ from datetime import date
 
 from tally.analyzer import parse_amount, analyze_transactions, export_json, export_csv
 from tally.analyzer import parse_generic_csv as _parse_generic_csv
+from tally.commands.explain import _print_merchant_explanation
 from tally.config_loader import load_supplemental_sources, resolve_source_format
 from tally.parsers import SkippedRow, ParseResult, _detect_date_format
 from tally.format_parser import parse_format_string
@@ -258,7 +259,7 @@ class TestExportJson:
         ])
 
         stats = analyze_transactions(txns)
-
+        
         # This should not raise "TypeError: 'float' object is not subscriptable"
         json_output = export_json(stats)
         
@@ -273,6 +274,45 @@ class TestExportJson:
         assert 'total' in parsed['by_month']['2025-01']
         assert parsed['by_month']['2025-01']['total'] == 55.0
         assert parsed['by_month']['2025-02']['total'] == 25.0
+
+
+class TestExplainCommand:
+    """Regression tests for explain command output."""
+
+    def test_text_output_verbose_uses_reasoning_without_crashing(self, capsys):
+        """Text output should initialize reasoning before verbose output uses it."""
+        merchant = {
+            'category': 'Savings',
+            'subcategory': 'BoligKredit',
+            'tags': [],
+            'raw_descriptions': {'BoligKredit Overforsel': 4},
+            'transactions': [
+                {'date': '04/07', 'amount': 12000.0, 'description': 'BoligKredit Overforsel'},
+            ],
+            'calc_type': 'avg',
+            'calc_reasoning': 'payments are consistent',
+            'calc_formula': 'avg_when_active = 12000.00 / 1 months = 12000.00',
+            'reasoning': {
+                'trace': ['matched savings rule'],
+                'cv': 0.0,
+            },
+            'match_info': {'pattern': 'contains("BoligKredit")', 'source': 'user'},
+        }
+
+        _print_merchant_explanation(
+            'BoligKredit Savings',
+            merchant,
+            output_format='text',
+            verbose=2,
+            num_months=4,
+            views_config=None,
+        )
+
+        output = capsys.readouterr().out
+        assert 'BoligKredit Savings' in output
+        assert 'Decision trace:' in output
+        assert 'matched savings rule' in output
+        assert 'CV: 0.00' in output
 
 
 class TestExportCsv:

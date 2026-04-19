@@ -657,13 +657,13 @@ def _print_merchant_explanation(name, data, output_format, verbose, num_months, 
 
     # Get matching views
     matching_views = _get_matching_views(data, views_config, num_months)
+    reasoning = data.get('reasoning', {})
 
     if output_format == 'json':
         merchant_json = build_merchant_json(name, data, verbose)
         merchant_json['views'] = matching_views
         print(json.dumps(merchant_json, indent=2))
     elif output_format == 'markdown':
-        reasoning = data.get('reasoning', {})
         print(f"## {name}")
         print(f"**Category:** {data.get('category', '')} > {data.get('subcategory', '')}")
         print(f"**Monthly Value:** ${data.get('monthly_value', 0):.2f}")
